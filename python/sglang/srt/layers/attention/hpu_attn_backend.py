@@ -64,9 +64,9 @@ class HPUAttnBackend(AttentionBackend):
                 layer, forward_batch.out_cache_loc, k, v
             )
 
-        query = q.view(1, -1, layer.tp_q_head_num, layer.qk_head_dim)
-        key = k.view(1, -1, layer.tp_k_head_num, layer.qk_head_dim)
-        value = v.view(1, -1, layer.tp_v_head_num, layer.v_head_dim)
+        query = q.view(forward_batch.batch_size, -1, layer.tp_q_head_num, layer.qk_head_dim)
+        key = k.view(forward_batch.batch_size, -1, layer.tp_k_head_num, layer.qk_head_dim)
+        value = v.view(forward_batch.batch_size, -1, layer.tp_v_head_num, layer.v_head_dim)
 
         output = ops.prompt_attention(
             impl="fsdpa",

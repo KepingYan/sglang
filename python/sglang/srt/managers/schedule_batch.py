@@ -1093,7 +1093,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         req_pool_indices_tensor = torch.tensor(req_pool_indices, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
-        input_ids_tensor = torch.tensor(sum(input_ids, []), dtype=torch.int64).to(
+        # input_ids_tensor = torch.tensor(sum(input_ids, []), dtype=torch.int64).to(
+        #     self.device, non_blocking=True
+        # )
+        input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
         seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int64).to(

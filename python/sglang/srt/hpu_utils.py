@@ -110,6 +110,12 @@ if _is_hpu:
     PREFILL_BUCKET_MIN = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MIN", 1024)
     PREFILL_BUCKET_STEP = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_STEP", 1024)
     PREFILL_BUCKET_MAX = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MAX", 5120)
+    
+    PREFILL_BATCH_BUCKET_MIN = get_int_env_var("SGLANG_HPU_DECODE_BATCH_BUCKET_MIN", 1)
+    PREFILL_BATCH_BUCKET_STEP = get_int_env_var(
+        "SGLANG_HPU_DECODE_BATCH_BUCKET_STEP", 32
+    )
+    PREFILL_BATCH_BUCKET_MAX = get_int_env_var("SGLANG_HPU_DECODE_BATCH_BUCKET_MAX", 128)
 
     DECODE_BLOCK_BUCKET_MIN = get_int_env_var("SGLANG_HPU_DECODE_BLOCK_BUCKET_MIN", 128)
     DECODE_BLOCK_BUCKET_STEP = get_int_env_var(
@@ -206,6 +212,12 @@ if _is_hpu:
         block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
         block_groups.masked_fill_(oob_values, batch_size)
         return block_mapping.to(torch.bfloat16), block_groups
+    
+    def get_prefill_batch_bucket(batch_size):
+        """Get the bucket index for prefill batch size."""
+        return find_bucket(
+            batch_size, (PREFILL_BATCH_BUCKET_MIN, PREFILL_BATCH_BUCKET_STEP, PREFILL_BATCH_BUCKET_MAX)
+        )
 
     def get_prefill_seq_len_bucket(sum_seq_len):
         return find_bucket(
@@ -262,7 +274,7 @@ if _is_hpu:
         )
         return result
 
-    def prepare_hpu_attn_bias_prefill(seq_lens, max_prompt_len, dtype):
+    def prepare_hpu_attn_bias_prefill(batch_size, seq_lens, max_prompt_len, dtype):
         seq_pos = [list(range(sl)) for sl in seq_lens]
         seq_idx = [[i] * sl for i, sl in enumerate(seq_lens)]
         seq_pos = make_cpu_tensor(
@@ -271,7 +283,7 @@ if _is_hpu:
         seq_idx = make_cpu_tensor(
             seq_idx, max_len=max_prompt_len, pad=-1, dtype=torch.long, flat=True
         )
-        attn_bias = torch.zeros(1, 1, max_prompt_len, max_prompt_len, dtype=dtype)
+        attn_bias = torch.zeros(batch_size, 1, max_prompt_len, max_prompt_len, dtype=dtype)
         return attn_bias, seq_pos, seq_idx
 
     def compute_hpu_attn_bias_prefill(seq_pos, seq_idx, dtype):
@@ -288,6 +300,20 @@ if _is_hpu:
 
     def to_hpu_and_pad_1d(tensor, pad_len, pad_value=0):
         return torch.nn.functional.pad(tensor.to("hpu"), (0, pad_len), value=pad_value)
+
+    def to_hpu_and_pad_2d(tensor, padding_bs, pad_len, pad_value=0):
+        print("====================== debug: ", tensor.size())
+            
+        if pad_value == 0:
+            padded_tensor = torch.zeros(padding_bs, pad_len, dtype=tensor.dtype, device="hpu")
+            if len(tensor.size()) == 1:
+                padded_tensor[0, :tensor.size(0)] = tensor
+            else:
+                for i in range(tensor.size(0)):
+                    padded_tensor[i, :tensor.size(1)] = tensor[i]
+        else:
+            raise ValueError("Only zero padding is supported for 2D tensors.")
+        return padded_tensor
 
     def compute_hpu_attn_bias_decode(page_size, block_usage, dtype):
         mask = torch.arange(0, page_size, device="hpu", dtype=torch.int32).unsqueeze(0)

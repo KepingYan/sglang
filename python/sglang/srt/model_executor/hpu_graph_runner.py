@@ -50,8 +50,10 @@ if _is_hpu:
         get_decode_batch_bucket,
         get_prefill_all_seq_len_buckets,
         get_prefill_seq_len_bucket,
+        get_prefill_batch_bucket,
         prepare_hpu_attn_bias_prefill,
         to_hpu_and_pad_1d,
+        to_hpu_and_pad_2d,
     )
 
 if TYPE_CHECKING:
@@ -97,26 +99,43 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
     page_size = model_runner.token_to_kv_pool_allocator.page_size
     if forward_batch.forward_mode.is_extend():
         seq_len_list = forward_batch.extend_seq_lens
-        sum_seq_len = seq_len_list.sum()
-        max_prompt_len = get_prefill_seq_len_bucket(sum_seq_len)
+        # sum_seq_len = seq_len_list.sum()
+        # max_prompt_len = get_prefill_seq_len_bucket(sum_seq_len)
+        max_padding_bs = get_prefill_batch_bucket(batch_size)
+        max_padding_prompt_len = get_prefill_seq_len_bucket(max(seq_len_list))
+        
         attn_bias, seq_pos, seq_idx = prepare_hpu_attn_bias_prefill(
+            batch_size=batch_size,
             seq_lens=seq_len_list,
-            max_prompt_len=max_prompt_len,
+            max_prompt_len=max_padding_prompt_len,
             dtype=model_runner.dtype,
         )
         attn_bias = attn_bias.to("hpu")
         seq_pos = seq_pos.to("hpu")
         seq_idx = seq_idx.to("hpu")
-        padding_len = max_prompt_len - sum_seq_len
+        # padding_len = max_prompt_len - sum_seq_len
         max_prefill_seqs = model_runner.server_args.max_running_requests
-        input_ids = to_hpu_and_pad_1d(forward_batch.input_ids, padding_len)
-        positions = to_hpu_and_pad_1d(forward_batch.positions, padding_len)
-        valid_seq_len = sum_seq_len.to("hpu", dtype=torch.int64)
+        max_padding_bs = min(
+            max_padding_bs, max_prefill_seqs
+        ) # Ensure we do not exceed max running requests
+        # input_ids = to_hpu_and_pad_1d(forward_batch.input_ids, padding_len)
+        # positions = to_hpu_and_pad_1d(forward_batch.positions, padding_len)
+        # valid_seq_len = sum_seq_len.to("hpu", dtype=torch.int64)
+        # extend_seq_lens_padded = to_hpu_and_pad_1d(
+        #     forward_batch.extend_seq_lens, max_prefill_seqs - batch_size
+        # )
+        # out_cache_loc = to_hpu_and_pad_1d(forward_batch.out_cache_loc, padding_len)
+        # batch_size = 1
+        
+        input_ids = to_hpu_and_pad_2d(forward_batch.input_ids, max_padding_bs, max_padding_prompt_len)
+        positions = to_hpu_and_pad_2d(forward_batch.positions, max_padding_bs, max_padding_prompt_len)
+        valid_seq_len = seq_len_list.to("hpu", dtype=torch.int64)
         extend_seq_lens_padded = to_hpu_and_pad_1d(
-            forward_batch.extend_seq_lens, max_prefill_seqs - batch_size
+            forward_batch.extend_seq_lens, max_padding_bs - batch_size
         )
-        out_cache_loc = to_hpu_and_pad_1d(forward_batch.out_cache_loc, padding_len)
-        batch_size = 1
+        out_cache_loc = to_hpu_and_pad_2d(forward_batch.out_cache_loc, max_padding_bs, max_padding_prompt_len)
+        
+        batch_size = max_padding_bs
         block_list = None
         block_mapping = None
         block_groups = None
@@ -170,17 +189,17 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
 
 
 def create_hpu_dummy_batch_prefill(
-    seq_len, dtype, page_size, max_running_requests, attn_backend, token_to_kv_pool
+    batch_size, seq_len, dtype, page_size, max_running_requests, attn_backend, token_to_kv_pool
 ):
     return HPUForwardBatch(
         forward_mode=ForwardMode.EXTEND,
-        batch_size=1,
-        input_ids=torch.zeros(seq_len, dtype=torch.int64, device="hpu"),
-        out_cache_loc=torch.arange(seq_len, dtype=torch.int64, device="hpu"),
-        positions=torch.zeros(seq_len, dtype=torch.int64, device="hpu"),
-        attn_bias=torch.zeros(1, 1, seq_len, seq_len, dtype=dtype, device="hpu"),
-        seq_pos=torch.zeros(1, seq_len, dtype=torch.int64, device="hpu"),
-        seq_idx=torch.zeros(1, seq_len, dtype=torch.int64, device="hpu"),
+        batch_size=batch_size,
+        input_ids=torch.zeros(batch_size, seq_len, dtype=torch.int64, device="hpu"),
+        out_cache_loc=torch.arange(batch_size*seq_len, dtype=torch.int64, device="hpu"),
+        positions=torch.zeros(batch_size, seq_len, dtype=torch.int64, device="hpu"),
+        attn_bias=torch.zeros(batch_size, 1, seq_len, seq_len, dtype=dtype, device="hpu"),
+        seq_pos=torch.zeros(batch_size, seq_len, dtype=torch.int64, device="hpu"),
+        seq_idx=torch.zeros(batch_size, seq_len, dtype=torch.int64, device="hpu"),
         valid_seq_len=torch.ones((), dtype=torch.int64, device="hpu"),
         extend_seq_lens=torch.ones(
             max_running_requests,
@@ -271,6 +290,7 @@ class HPUGraphRunner:
             else HPUAdapter(self.model_runner.model, self.model_runner.dtype)
         )
         # Capture
+        self.seen_configs: set = set()
         if not SKIP_WARMUP:
             try:
                 with self.model_capture_mode():
@@ -298,8 +318,9 @@ class HPUGraphRunner:
         # prefill
         time_start = time.perf_counter()
         prefill_seq_len_buckets = get_prefill_all_seq_len_buckets()
-        for seq_len in prefill_seq_len_buckets:
-            self.capture_prefill(seq_len)
+        for batch_size, seq_len in prefill_seq_len_buckets:
+            self.seen_configs.add(("prefill", batch_size, seq_len))
+            self.capture_prefill(batch_size, seq_len)
         time_end = time.perf_counter()
         logger.info(f"Capture prefill time: {time_end - time_start} seconds")
 
@@ -308,12 +329,14 @@ class HPUGraphRunner:
         all_buckets = get_decode_all_buckets()
         for batch_size, seq_len in all_buckets:
             self.capture_decode(batch_size, seq_len)
+            self.seen_configs.add(("decode", batch_size, seq_len))
         time_end = time.perf_counter()
         logger.info(f"Capture decode time: {time_end - time_start} seconds")
 
-    def capture_prefill(self, seq_len):
-        logger.info(f"Capture prefill with seq_len: {seq_len}")
+    def capture_prefill(self, batch_size, seq_len):
+        logger.info(f"Capture prefill with batch_size: {batch_size} seq_len: {seq_len}")
         forward_batch = create_hpu_dummy_batch_prefill(
+            batch_size,
             seq_len,
             self.model_runner.dtype,
             self.model_runner.token_to_kv_pool_allocator.page_size,
@@ -346,14 +369,30 @@ class HPUGraphRunner:
                 forward_batch.input_ids, forward_batch.positions, forward_batch
             )
 
+    def _check_config(self, forward_batch):
+        cfg: Optional[tuple] = None
+        if forward_batch.forward_mode.is_extend():
+            cfg = ("prefill", forward_batch.batch_size, forward_batch.input_ids.size(-1))
+        else:
+            cfg = ("decode", len(forward_batch.input_ids), len(forward_batch.block_list))
+        seen = cfg in self.seen_configs
+        self.seen_configs.add(cfg)
+        if not seen:
+            logger.warning("============== Configuration: %s was not warmed-up!", cfg)
+
     def _forward(self, forward_batch: ForwardBatch):
         import habana_frameworks.torch as htorch
 
         forward_batch_hpu = create_hpu_forward_batch(forward_batch, self.model_runner)
+        self._check_config(forward_batch_hpu)
         results = self.model.forward(
             forward_batch_hpu.input_ids, forward_batch_hpu.positions, forward_batch_hpu
         )
         htorch.core.mark_step()
+        # todo: may affect results, need to check
+        results.next_token_logits = results.next_token_logits.reshape(
+            forward_batch_hpu.batch_size, -1
+        )
         logits_output = LogitsProcessorOutput(
             next_token_logits=results.next_token_logits.clone()[
                 : forward_batch.batch_size
