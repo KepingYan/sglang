@@ -99,8 +99,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
     page_size = model_runner.token_to_kv_pool_allocator.page_size
     if forward_batch.forward_mode.is_extend():
         seq_len_list = forward_batch.extend_seq_lens
-        # sum_seq_len = seq_len_list.sum()
-        # max_prompt_len = get_prefill_seq_len_bucket(sum_seq_len)
+        sum_seq_len = seq_len_list.sum()
         max_padding_bs = get_prefill_batch_bucket(batch_size)
         max_padding_prompt_len = get_prefill_seq_len_bucket(max(seq_len_list))
         
@@ -118,22 +117,13 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         max_padding_bs = min(
             max_padding_bs, max_prefill_seqs
         ) # Ensure we do not exceed max running requests
-        # input_ids = to_hpu_and_pad_1d(forward_batch.input_ids, padding_len)
-        # positions = to_hpu_and_pad_1d(forward_batch.positions, padding_len)
-        # valid_seq_len = sum_seq_len.to("hpu", dtype=torch.int64)
-        # extend_seq_lens_padded = to_hpu_and_pad_1d(
-        #     forward_batch.extend_seq_lens, max_prefill_seqs - batch_size
-        # )
-        # out_cache_loc = to_hpu_and_pad_1d(forward_batch.out_cache_loc, padding_len)
-        # batch_size = 1
-        
+        out_cache_loc = to_hpu_and_pad_1d(forward_batch.out_cache_loc, max_padding_bs * max_padding_prompt_len - sum_seq_len)
         input_ids = to_hpu_and_pad_2d(forward_batch.input_ids, max_padding_bs, max_padding_prompt_len)
         positions = to_hpu_and_pad_2d(forward_batch.positions, max_padding_bs, max_padding_prompt_len)
         valid_seq_len = seq_len_list.to("hpu", dtype=torch.int64)
         extend_seq_lens_padded = to_hpu_and_pad_1d(
             forward_batch.extend_seq_lens, max_padding_bs - batch_size
         )
-        out_cache_loc = to_hpu_and_pad_2d(forward_batch.out_cache_loc, max_padding_bs, max_padding_prompt_len)
         
         batch_size = max_padding_bs
         block_list = None
@@ -389,10 +379,6 @@ class HPUGraphRunner:
             forward_batch_hpu.input_ids, forward_batch_hpu.positions, forward_batch_hpu
         )
         htorch.core.mark_step()
-        # todo: may affect results, need to check
-        results.next_token_logits = results.next_token_logits.reshape(
-            forward_batch_hpu.batch_size, -1
-        )
         logits_output = LogitsProcessorOutput(
             next_token_logits=results.next_token_logits.clone()[
                 : forward_batch.batch_size

@@ -58,6 +58,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import flatten_nested_list, get_compiler_backend, is_hpu
+from torch.nn.utils.rnn import pad_sequence
 
 _is_hpu = is_hpu()
 if _is_hpu:
@@ -1093,9 +1094,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         req_pool_indices_tensor = torch.tensor(req_pool_indices, dtype=torch.int64).to(
             self.device, non_blocking=True
         )
-        # input_ids_tensor = torch.tensor(sum(input_ids, []), dtype=torch.int64).to(
-        #     self.device, non_blocking=True
-        # )
+        input_ids_tensor_list  = [torch.tensor(input_id) for input_id in input_ids]
+        input_ids = pad_sequence(input_ids_tensor_list, batch_first=True)
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64).to(
             self.device, non_blocking=True
         )

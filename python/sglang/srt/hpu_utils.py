@@ -107,9 +107,9 @@ if _is_hpu:
     _PAD_BLOCK_USAGE = 1
     _PAD_BLOCK_GROUP = -1
 
-    PREFILL_BUCKET_MIN = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MIN", 1024)
-    PREFILL_BUCKET_STEP = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_STEP", 1024)
-    PREFILL_BUCKET_MAX = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MAX", 5120)
+    PREFILL_BUCKET_MIN = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MIN", 128)
+    PREFILL_BUCKET_STEP = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_STEP", 128)
+    PREFILL_BUCKET_MAX = get_int_env_var("SGLANG_HPU_PREFILL_BUCKET_MAX", 1024)
     
     PREFILL_BATCH_BUCKET_MIN = get_int_env_var("SGLANG_HPU_DECODE_BATCH_BUCKET_MIN", 1)
     PREFILL_BATCH_BUCKET_STEP = get_int_env_var(
@@ -122,7 +122,7 @@ if _is_hpu:
         "SGLANG_HPU_DECODE_BLOCK_BUCKET_STEP", 128
     )
     DECODE_BLOCK_BUCKET_MAX = get_int_env_var(
-        "SGLANG_HPU_DECODE_BLOCK_BUCKET_MAX", 2560
+        "SGLANG_HPU_DECODE_BLOCK_BUCKET_MAX", 2048
     )
     DECODE_BATCH_BUCKET_MIN = get_int_env_var("SGLANG_HPU_DECODE_BATCH_BUCKET_MIN", 1)
     DECODE_BATCH_BUCKET_STEP = get_int_env_var(
@@ -278,10 +278,10 @@ if _is_hpu:
         seq_pos = [list(range(sl)) for sl in seq_lens]
         seq_idx = [[i] * sl for i, sl in enumerate(seq_lens)]
         seq_pos = make_cpu_tensor(
-            seq_pos, max_len=max_prompt_len, pad=-1, dtype=torch.long, flat=True
+            seq_pos, max_len=max_prompt_len, pad=-1, dtype=torch.long, flat=False
         )
         seq_idx = make_cpu_tensor(
-            seq_idx, max_len=max_prompt_len, pad=-1, dtype=torch.long, flat=True
+            seq_idx, max_len=max_prompt_len, pad=-1, dtype=torch.long, flat=False
         )
         attn_bias = torch.zeros(batch_size, 1, max_prompt_len, max_prompt_len, dtype=dtype)
         return attn_bias, seq_pos, seq_idx
@@ -302,8 +302,6 @@ if _is_hpu:
         return torch.nn.functional.pad(tensor.to("hpu"), (0, pad_len), value=pad_value)
 
     def to_hpu_and_pad_2d(tensor, padding_bs, pad_len, pad_value=0):
-        print("====================== debug: ", tensor.size())
-            
         if pad_value == 0:
             padded_tensor = torch.zeros(padding_bs, pad_len, dtype=tensor.dtype, device="hpu")
             if len(tensor.size()) == 1:

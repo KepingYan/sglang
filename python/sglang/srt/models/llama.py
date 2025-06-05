@@ -468,6 +468,9 @@ class LlamaForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             if not get_embedding:
+                # todo: follow vllm to create selected_token_indices
+                if hidden_states.dim() == 3:
+                    hidden_states = hidden_states[:, 0, :]
                 return self.logits_processor(
                     input_ids,
                     hidden_states,

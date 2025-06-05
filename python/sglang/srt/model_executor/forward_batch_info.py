@@ -40,6 +40,8 @@ import triton.language as tl
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import flatten_nested_list, get_compiler_backend, is_hpu
 
+from torch.nn.utils.rnn import pad_sequence
+
 _is_hpu = is_hpu()
 if _is_hpu:
     from sglang.srt.hpu_utils import HPUBlockMetadata
@@ -688,15 +690,14 @@ def compute_position_kernel(
 def compute_position_torch(
     extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor
 ):
-    positions = torch.cat(
-        [
-            torch.arange(
-                prefix_len, prefix_len + extend_len, device=extend_prefix_lens.device
-            )
-            for prefix_len, extend_len in zip(extend_prefix_lens, extend_seq_lens)
-        ],
-        axis=0,
-    )
+    positions = [
+                    torch.arange(
+                        prefix_len, prefix_len + extend_len, device=extend_prefix_lens.device
+                    )
+                    for prefix_len, extend_len in zip(extend_prefix_lens, extend_seq_lens)
+                ]
+    positions = pad_sequence(positions, batch_first=True)
+
     extend_start_loc = torch.zeros_like(extend_seq_lens)
     extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
     return positions.to(torch.int64), extend_start_loc
